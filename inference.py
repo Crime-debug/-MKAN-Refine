@@ -29,8 +29,9 @@ LABEL_NAMES = [
 
 def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 @dataclass
@@ -51,12 +52,12 @@ class Config:
 
     seeds: List[int] = field(default_factory=lambda: [3407, 42, 2024])
 
-    # Ensemble weights selected on the development set and fixed for test inference
+    # Fixed ensemble configuration used for final inference
     ensemble_weights: List[float] = field(
         default_factory=lambda: [0.18749672, 0.18847652, 0.62402676]
     )
 
-    # Logit adjustment for class imbalance calibration, selected on the development set
+    # Optional logit adjustment for class imbalance handling
     bias_config: Dict[int, float] = field(
         default_factory=lambda: {0: 0.1, 4: -0.4}
     )
@@ -65,12 +66,21 @@ class Config:
 
 
 class CrisisDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, processor: CLIPProcessor, transform, img_root: str, max_text_len: int):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        processor: CLIPProcessor,
+        transform,
+        img_root: str,
+        max_text_len: int,
+        img_size: int,
+    ):
         self.df = df.reset_index(drop=True)
         self.processor = processor
         self.transform = transform
         self.img_root = img_root
         self.max_text_len = max_text_len
+        self.img_size = img_size
 
     def __len__(self) -> int:
         return len(self.df)
@@ -83,7 +93,7 @@ class CrisisDataset(Dataset):
             image = Image.open(img_path).convert("RGB")
             pixel_values = self.transform(image)
         except Exception:
-            pixel_values = torch.zeros((3, self.transform.transforms[0].size[0], self.transform.transforms[0].size[1]))
+            pixel_values = torch.zeros((3, self.img_size, self.img_size))
 
         text = str(row["text"]) if "text" in row else str(row["tweet_text"])
 
@@ -155,7 +165,12 @@ class MKANRefine(nn.Module):
             KANLinear(512, num_classes),
         )
 
-    def forward(self, input_ids: torch.Tensor, pixel_values: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        pixel_values: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
         vision_out = self.clip.vision_model(pixel_values)
         text_out = self.clip.text_model(input_ids, attention_mask=attention_mask)
 
@@ -197,7 +212,7 @@ def load_checkpoint(path: str, device: torch.device) -> Dict[str, torch.Tensor]:
     return clean_state_dict(state_dict)
 
 
-def build_dataloader(cfg: Config):
+def build_dataloader(cfg: Config) -> DataLoader:
     test_path = os.path.join(cfg.data_dir, cfg.test_file)
     if not os.path.exists(test_path):
         raise FileNotFoundError(f"Test file not found: {test_path}")
@@ -220,6 +235,7 @@ def build_dataloader(cfg: Config):
         transform=transform,
         img_root=cfg.img_root,
         max_text_len=cfg.max_text_len,
+        img_size=cfg.img_size,
     )
 
     loader = DataLoader(
@@ -272,7 +288,10 @@ def apply_ensemble(logits_list: List[np.ndarray], weights: List[float]) -> np.nd
     return final_logits
 
 
-def apply_bias_adjustment(logits: np.ndarray, bias_config: Optional[Dict[int, float]]) -> np.ndarray:
+def apply_bias_adjustment(
+    logits: np.ndarray,
+    bias_config: Optional[Dict[int, float]],
+) -> np.ndarray:
     if bias_config is None:
         return logits
     adjusted = logits.copy()
@@ -297,7 +316,7 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> None:
     )
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inference script for MKAN-Refine")
     parser.add_argument("--data_dir", type=str, default="./data/task_data_sci")
     parser.add_argument("--img_root", type=str, default="./data")
@@ -310,7 +329,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
     cfg = Config(
         data_dir=args.data_dir,
@@ -332,10 +351,7 @@ def main():
     print(f"Model backbone: {cfg.model_name}")
     print(f"Checkpoint directory: {cfg.save_dir}")
     print(f"Ensemble seeds: {cfg.seeds}")
-    print(f"Ensemble weights: {cfg.ensemble_weights}")
     print(f"Bias adjustment enabled: {cfg.use_bias_adjustment}")
-    if cfg.use_bias_adjustment:
-        print(f"Bias config: {cfg.bias_config}")
 
     loader = build_dataloader(cfg)
 
