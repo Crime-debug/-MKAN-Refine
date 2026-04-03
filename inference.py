@@ -57,12 +57,12 @@ class Config:
         default_factory=lambda: [0.18749672, 0.18847652, 0.62402676]
     )
 
-    # Optional logit adjustment for class imbalance handling
+    # Optional post-hoc logit adjustment (disabled by default to match the manuscript inference setting)
     bias_config: Dict[int, float] = field(
         default_factory=lambda: {0: 0.1, 4: -0.4}
     )
 
-    use_bias_adjustment: bool = True
+    use_bias_adjustment: bool = Flase
 
 
 class CrisisDataset(Dataset):
@@ -325,7 +325,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--output_file", type=str, default="submission_mkan_refine.csv")
-    parser.add_argument("--disable_bias_adjustment", action="store_true")
+    parser.add_argument("--enable_bias_adjustment", action="store_true")
     return parser.parse_args()
 
 
@@ -339,7 +339,7 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         output_file=args.output_file,
-        use_bias_adjustment=not args.disable_bias_adjustment,
+        use_bias_adjustment=args.enable_bias_adjustment,
     )
 
     set_seed(3407)
